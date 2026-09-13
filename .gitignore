@@ -1,0 +1,7 @@
+/result
+/result-*
+/.act-artifacts/
+/.act.env
+/.act.secrets
+__pycache__/
+*.pyc
