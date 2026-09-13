@@ -6,6 +6,11 @@ Requirements: Docker, `act`, network access for GitHub/Nix/Cargo downloads, and
 enough disk space for two Rust builds and NixOS VM closures. `nix develop` supplies
 `act`; Docker must already be available on the host.
 
+The build workflows remove unused preinstalled SDKs on GitHub-hosted runners
+before installing Nix to leave room for Rust builds and VM closures. This cleanup
+is skipped under `act` and on self-hosted runners. Local runs use the available
+Docker disk space and do not reproduce GitHub-hosted disk limits.
+
 Use an ordinary Git checkout with an initial commit so `act` can resolve HEAD.
 The runner image is `catthehacker/ubuntu:act-24.04` on `linux/amd64`.
 
