@@ -1,0 +1,114 @@
+name: Update
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Validate without publishing update branches or PRs
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: updates
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        kind: [objdiff, nixpkgs]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            max-jobs = 1
+            cores = 2
+            keep-failed = true
+      - name: Test updater failure and unchanged-version handling
+        run: nix develop --command python3 -m unittest discover -s scripts -p 'test_*.py' -v
+      - name: Prepare and validate candidate
+        env:
+          UPDATE_KIND: ${{ matrix.kind }}
+          DRY_RUN: ${{ inputs.dry_run || env.ACT == 'true' }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          mkdir -p .act-artifacts
+          args=()
+          if [[ "$DRY_RUN" == true ]]; then args+=(--dry-run); fi
+          set -o pipefail
+          nix develop --command python3 scripts/update.py "$UPDATE_KIND" "${args[@]}" 2>&1 | tee .act-artifacts/update.log
+      - name: Upload validated metadata
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: update-${{ matrix.kind }}
+          path: |
+            pkgs/objdiff/source.json
+            flake.lock
+      - name: Collect VM diagnostics
+        if: failure()
+        run: bash scripts/collect-diagnostics.sh
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: update-diagnostics-${{ matrix.kind }}
+          path: .act-artifacts/
+          include-hidden-files: true
+          if-no-files-found: ignore
+
+  publish:
+    needs: prepare
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    strategy:
+      matrix:
+        kind: [objdiff, nixpkgs]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        if: ${{ !env.ACT }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: ${{ !env.ACT }}
+        with:
+          name: update-${{ matrix.kind }}
+          path: candidate
+      - name: Apply validated metadata
+        if: ${{ !env.ACT }}
+        env:
+          UPDATE_KIND: ${{ matrix.kind }}
+        run: |
+          if [ "$UPDATE_KIND" = objdiff ]; then
+            cp candidate/pkgs/objdiff/source.json pkgs/objdiff/source.json
+          else
+            cp candidate/flake.lock flake.lock
+          fi
+      - name: Create or refresh update PR
+        if: ${{ !env.ACT }}
+        uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7
+        with:
+          branch: automation/update-${{ matrix.kind }}
+          delete-branch: true
+          add-paths: |
+            pkgs/objdiff/source.json
+            flake.lock
+          commit-message: 'chore: update ${{ matrix.kind }}'
+          title: 'chore: update ${{ matrix.kind }}'
+          body: |
+            Updates the pinned dependency using the repository updater.
+
+            The candidate passed the package builds, upstream tests, CLI comparison,
+            graphical VM tests, formatting checks, and workflow linting before publication.
+            Review the update workflow logs before merging; this PR is not merged automatically.
