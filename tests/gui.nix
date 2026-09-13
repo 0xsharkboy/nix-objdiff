@@ -25,6 +25,14 @@ testers.runNixOSTest {
       extraGroups = [ "video" ];
     };
     services.getty.autologinUser = lib.mkIf (backend == "wayland") "alice";
+    # Under TCG, device discovery and seat authorization can lag behind login.
+    systemd.services."getty@" = lib.mkIf (backend == "wayland") {
+      wants = [ "polkit.service" ];
+      after = [ "polkit.service" ];
+      preStart = ''
+        ${pkgs.systemd}/bin/udevadm settle --timeout=180
+      '';
+    };
     hardware.graphics.enable = true;
     fonts.packages = [ pkgs.dejavu_fonts ];
     environment.systemPackages = [
@@ -41,7 +49,7 @@ testers.runNixOSTest {
     programs.sway.enable = backend == "wayland";
     programs.bash.loginShellInit = lib.optionalString (backend == "wayland") ''
       if [ "$(tty)" = /dev/tty1 ]; then
-        exec sway --config /etc/sway-test.conf
+        exec sway --debug --config /etc/sway-test.conf >> /tmp/sway.log 2>&1
       fi
     '';
     environment.etc."sway-test.conf".text = ''
@@ -83,7 +91,12 @@ testers.runNixOSTest {
         machine.fail("grep -E 'panicked at|Failed to launch application' /tmp/objdiff.log")
     finally:
         machine.execute("cat /tmp/objdiff.log >&2")
+        if "${backend}" == "wayland":
+            machine.execute("cat /tmp/sway.log >&2")
+            machine.execute("su - alice -c 'swaymsg -t get_tree' >&2")
         machine.screenshot("objdiff-${backend}-final")
-        machine.copy_from_machine("/tmp/objdiff.log")
+        for log_name in ["objdiff.log", "sway.log"]:
+            if machine.execute("test -f /tmp/" + log_name)[0] == 0:
+                machine.copy_from_machine("/tmp/" + log_name)
   '';
 }
